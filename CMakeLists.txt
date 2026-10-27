@@ -249,6 +249,9 @@ boolean_number(WITH_SIMD)
 option(WITH_TURBOJPEG "Include the TurboJPEG API library and associated test programs" TRUE)
 boolean_number(WITH_TURBOJPEG)
 option(WITH_FUZZ "Build fuzz targets" FALSE)
+option(WITH_TRELLIS_THREADS
+  "Allow trellis quantization to use multiple threads (see JINT_TRELLIS_THREADS; requires pthreads)"
+  TRUE)
 
 macro(report_option var desc)
   if(${var})
@@ -537,6 +540,16 @@ else()
   unset(THREAD_LOCAL)
 endif()
 
+if(WITH_TRELLIS_THREADS)
+  set(THREADS_PREFER_PTHREAD_FLAG TRUE)
+  find_package(Threads)
+  if(NOT CMAKE_USE_PTHREADS_INIT)
+    message(STATUS "pthreads not found: trellis quantization will be single-threaded")
+    set(WITH_TRELLIS_THREADS FALSE)
+  endif()
+endif()
+report_option(WITH_TRELLIS_THREADS "Multithreaded trellis quantization")
+
 if(UNIX AND NOT APPLE)
   file(WRITE ${CMAKE_CURRENT_BINARY_DIR}/conftest.map "VERS_1 { global: *; };")
   set(CMAKE_REQUIRED_FLAGS
@@ -650,6 +663,9 @@ if(ENABLE_STATIC)
   if(NOT MSVC)
     set_target_properties(jpeg-static PROPERTIES OUTPUT_NAME jpeg)
   endif()
+  if(WITH_TRELLIS_THREADS)
+    target_link_libraries(jpeg-static Threads::Threads)
+  endif()
 endif()
 
 if(WITH_TURBOJPEG)
@@ -672,6 +688,9 @@ if(WITH_TURBOJPEG)
     add_library(turbojpeg SHARED ${TURBOJPEG_SOURCES})
     set_property(TARGET turbojpeg PROPERTY COMPILE_FLAGS
       "-DBMP_SUPPORTED -DPPM_SUPPORTED")
+    if(WITH_TRELLIS_THREADS)
+      target_link_libraries(turbojpeg Threads::Threads)
+    endif()
     if(WIN32)
       set_target_properties(turbojpeg PROPERTIES DEFINE_SYMBOL DLLDEFINE)
     endif()
@@ -717,6 +736,9 @@ if(WITH_TURBOJPEG)
       rdppm.c wrbmp.c wrppm.c)
     set_property(TARGET turbojpeg-static PROPERTY COMPILE_FLAGS
       "-DBMP_SUPPORTED -DPPM_SUPPORTED")
+    if(WITH_TRELLIS_THREADS)
+      target_link_libraries(turbojpeg-static Threads::Threads)
+    endif()
     if(NOT MSVC)
       set_target_properties(turbojpeg-static PROPERTIES OUTPUT_NAME turbojpeg)
     endif()
@@ -1415,6 +1437,31 @@ foreach(libtype ${TEST_LIBTYPES})
   add_bittest(jpegtran crop "-revert;-crop;120x90+20+50;-transpose;-perfect"
     testout_crop.jpg ${TESTIMAGES}/${TESTORIG}
     ${MD5_JPEG_CROP})
+  # Trellis quantization must give the same output on any number of threads.
+  # (Its float arithmetic varies by platform, so compare runs, not MD5s.)
+  foreach(trellis_test default baseline 444 gray)
+    if(trellis_test STREQUAL "baseline")
+      set(TRELLIS_ARGS -baseline)
+    elseif(trellis_test STREQUAL "444")
+      set(TRELLIS_ARGS -sample 1x1)
+    elseif(trellis_test STREQUAL "gray")
+      set(TRELLIS_ARGS -grayscale)
+    else()
+      set(TRELLIS_ARGS)
+    endif()
+    set(TRELLIS_OUT testout${suffix}_trellis_${trellis_test})
+    foreach(threads 1 4)
+      add_test(NAME cjpeg-${libtype}-trellis-${trellis_test}-threads-${threads}
+        COMMAND cjpeg${suffix} ${TRELLIS_ARGS} -trellis-threads ${threads}
+          -outfile ${TRELLIS_OUT}_${threads}.jpg ${TESTIMAGES}/testorig.ppm)
+    endforeach()
+    add_test(NAME cjpeg-${libtype}-trellis-${trellis_test}-threads-cmp
+      COMMAND ${CMAKE_COMMAND} -E compare_files ${TRELLIS_OUT}_1.jpg
+        ${TRELLIS_OUT}_4.jpg)
+    set_tests_properties(cjpeg-${libtype}-trellis-${trellis_test}-threads-cmp
+      PROPERTIES DEPENDS
+        "cjpeg-${libtype}-trellis-${trellis_test}-threads-1;cjpeg-${libtype}-trellis-${trellis_test}-threads-4")
+  endforeach()
 
 endforeach()
 
